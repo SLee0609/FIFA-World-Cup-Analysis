@@ -1,0 +1,352 @@
+---
+title: "The Effects of Recovery and Workload on Player Physical Performance at the FIFA World Cup"
+output:
+  pdf_document:
+    latex_engine: xelatex
+date: "2026-09-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(psych)
+library(scales)
+library(splines)
+library(lme4)
+library(lmerTest)
+```
+
+## 1. Data Processing
+
+```{r}
+# Load raw data
+df <- read.csv("raw_data.csv")
+nrow(df)
+```
+
+```{r}
+# Variables whose previous-match values we want to retain
+prev_vars <- c(
+  "nominal_minutes_played",
+  "total_distance_m",
+  "zone1_distance_m",
+  "zone2_distance_m",
+  "zone3_distance_m",
+  "zone4_distance_m",
+  "zone5_distance_m",
+  "top_speed_kmh"
+)
+
+# Add previous-match information
+df <- df %>%
+  mutate(
+    # Convert match_date to Date
+    match_date = as.Date(match_date)
+  ) %>%
+  
+  # Put each player's appearances in chronological order
+  arrange(
+    tournament_year,
+    player_tournament_id,
+    match_date,
+    fifa_match_number
+  ) %>%
+
+  # Previous matches must be computed separately within each tournament/player
+  group_by(tournament_year, player_tournament_id) %>%
+
+  mutate(
+    # Match metadata from previous appearance
+    prev_match_id = lag(match_id),
+    prev_match_date = lag(match_date),
+
+    # Days since previous appearance
+    recovery_days = as.integer(match_date - prev_match_date),
+
+    # Previous-match physical statistics
+    across(
+      all_of(prev_vars),
+      lag,
+      .names = "prev_{.col}"
+    )
+  ) %>%
+
+  ungroup()
+```
+
+```{r}
+df <- df %>%
+  # Filter out rows where player played less than 10 minutes
+  filter(
+    !(is.na(nominal_minutes_played) | nominal_minutes_played < 10)
+  ) %>%
+  
+  # Normalize distance statistics by minutes played
+  mutate(
+    normalized_total_distance_m = total_distance_m / nominal_minutes_played,
+    normalized_zone1_distance_m = zone1_distance_m / nominal_minutes_played,
+    normalized_zone2_distance_m = zone2_distance_m / nominal_minutes_played,
+    normalized_zone3_distance_m = zone3_distance_m / nominal_minutes_played,
+    normalized_zone4_distance_m = zone4_distance_m / nominal_minutes_played,
+    normalized_zone5_distance_m = zone5_distance_m / nominal_minutes_played,
+  )
+
+nrow(df)
+```
+
+```{r}
+head(df)
+str(df)
+```
+
+## 2. Data Visualization
+
+```{r}
+# Running Rate Distribution by Position
+df %>%
+  ggplot(aes(
+    x = normalized_total_distance_m,
+    color = position,
+    fill = position
+  )) +
+  geom_density(alpha = 0.15) +
+  labs(
+    title = "Running Rate Distribution by Position",
+    x = "Running rate (meters per minute)",
+    y = "Density",
+    color = "Position",
+    fill = "Position"
+  )
+```
+
+```{r}
+pairs.panels(df[, c(
+  "prev_nominal_minutes_played",
+  "prev_total_distance_m",
+  "recovery_days",
+  "nominal_minutes_played",
+  "normalized_total_distance_m"
+)], gap = 0, pch = ".")
+```
+
+```{r}
+# Running Rate vs. Minutes Played by Position
+df %>%
+  ggplot(aes(
+    x = nominal_minutes_played,
+    y = normalized_total_distance_m,
+    color = position
+  )) +
+  geom_point(alpha = 0.4) +
+  labs(
+    title = "Running Rate vs. Minutes Played by Position",
+    x = "Minutes played",
+    y = "Running rate (meters per minute)",
+    color = "Position"
+  )
+```
+
+```{r}
+# Ignore GK and combine all other positions, facet by minutes played bins (adjust bins)
+
+# Running Rate vs. Recovery Days by Position and Minutes Played
+df %>%
+  filter(!is.na(recovery_days)) %>%
+  filter(recovery_days < 15) %>%
+  mutate(
+    minutes_bin = cut(
+      nominal_minutes_played,
+      breaks = c(0, 30, 60, 90, Inf),
+      labels = c("≤30", "31–60", "61–90", ">90")
+    )
+  ) %>%
+  ggplot(aes(
+    x = recovery_days,
+    y = normalized_total_distance_m,
+    color = minutes_bin
+  )) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(aes(group = 1), method = "lm", color = "black") +
+  facet_wrap(~position) +
+  labs(
+    title = "Running Rate vs. Recovery Days by Position and Minutes Played",
+    x = "Recovery days",
+    y = "Running rate (meters per minute)",
+    color = "Minutes played"
+  )
+```
+
+```{r}
+# Don't mean center recover days
+
+# Within-Player Running Rate vs. Recovery Days
+df %>%
+  filter(!is.na(recovery_days)) %>%
+  group_by(player_tournament_id) %>%
+  filter(n() >= 2) %>%
+  mutate(
+    recovery_dev = recovery_days,
+    running_rate_dev = normalized_total_distance_m - mean(normalized_total_distance_m)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    minutes_bin = cut(
+      nominal_minutes_played,
+      breaks = c(0, 30, 60, 90, Inf),
+      labels = c("≤30", "31–60", "61–90", ">90")
+    )
+  ) %>%
+  ggplot(aes(
+    x = recovery_dev,
+    y = running_rate_dev,
+    color = minutes_bin
+  )) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(aes(group = 1), method = "lm", color = "black") +
+  facet_wrap(~position) +
+  labs(
+    title = "Within-Player Running Rate vs. Recovery Days",
+    x = "Recovery days relative to player average",
+    y = "Running rate relative to player average (m/min)",
+    color = "Minutes played"
+  )
+```
+
+```{r}
+# Running Rate vs. Previous-Match Distance by Position and Minutes Played
+df %>%
+  filter(!is.na(prev_total_distance_m)) %>%
+  mutate(
+    minutes_bin = cut(
+      nominal_minutes_played,
+      breaks = c(0, 30, 60, 90, Inf),
+      labels = c("≤30", "31–60", "61–90", ">90")
+    )
+  ) %>%
+  ggplot(aes(
+    x = prev_total_distance_m,
+    y = normalized_total_distance_m,
+    color = minutes_bin
+  )) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(aes(group = 1), method = "lm", color = "black") +
+  facet_wrap(~position) +
+  labs(
+    title = "Running Rate vs. Previous-Match Distance by Position and Minutes Played",
+    x = "Previous-match distance (meters)",
+    y = "Running rate (meters per minute)",
+    color = "Minutes played"
+  )
+```
+
+```{r}
+# Within-Player Running Rate vs. Previous-Match Distance
+df %>%
+  filter(!is.na(prev_total_distance_m)) %>%
+  group_by(player_tournament_id) %>%
+  filter(n() >= 2) %>%
+  mutate(
+    prev_distance_dev = prev_total_distance_m - mean(prev_total_distance_m),
+    running_rate_dev = normalized_total_distance_m - mean(normalized_total_distance_m)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    minutes_bin = cut(
+      nominal_minutes_played,
+      breaks = c(0, 30, 60, 90, Inf),
+      labels = c("≤30", "31–60", "61–90", ">90")
+    )
+  ) %>%
+  ggplot(aes(
+    x = prev_distance_dev,
+    y = running_rate_dev,
+    color = minutes_bin
+  )) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(aes(group = 1), method = "lm", color = "black") +
+  facet_wrap(~position) +
+  labs(
+    title = "Within-Player Running Rate vs. Previous-Match Distance",
+    x = "Previous-match distance relative to player average (m)",
+    y = "Running rate relative to player average (m/min)",
+    color = "Minutes played"
+  )
+```
+
+## 3. Modeling
+
+```{r}
+# Ignore rows corresponding to first game at the tournament for a player (missing previous game data)
+df_filtered <- df %>% filter(!is.na(recovery_days))
+```
+
+
+```{r}
+# normalized_total_distance_m ~ 1 + recovery_days + position
+fit1 <- lm(normalized_total_distance_m ~
+             recovery_days +
+             position,
+           data = df_filtered)
+summary(fit1)
+```
+
+```{r}
+# Fix position and recovery days and plot fitted values to see spline curve
+
+# Add ns(nominal_minutes_played, df=4)
+fit2 <- lm(normalized_total_distance_m ~
+             recovery_days +
+             position +
+             ns(nominal_minutes_played, df=4),
+           data = df_filtered)
+summary(fit2)
+```
+
+```{r}
+# Add prev_total_distance_m
+fit3 <- lm(normalized_total_distance_m ~
+             recovery_days +
+             position +
+             prev_total_distance_m +
+             ns(nominal_minutes_played, df=4),
+           data = df_filtered)
+summary(fit3)
+```
+
+```{r}
+# Add random_effect(team_tournament_id)
+fit4 <- lmer(normalized_total_distance_m ~
+               recovery_days +
+               position +
+               prev_total_distance_m +
+               ns(nominal_minutes_played, df=4) +
+               (1 | team_tournament_id),
+             data = df_filtered)
+summary(fit4)
+```
+
+```{r}
+# Add random_effect(player_tournament_id)
+fit5 <- lmer(normalized_total_distance_m ~
+               recovery_days +
+               position +
+               prev_total_distance_m +
+               ns(nominal_minutes_played, df=4) +
+               (1 | team_tournament_id) +
+               (1 | player_tournament_id),
+             data = df_filtered)
+summary(fit5)
+```
+
+```{r}
+# Show top/bottom entries of random intercepts
+# Dot and whisker plots by position
+
+# Look at data to see which soccer outcome we can link to (# of pressures)
+```
+
+
