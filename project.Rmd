@@ -31,7 +31,7 @@ nrow(df)
 ```{r}
 # Variables whose previous-match values we want to retain
 prev_vars <- c(
-  "nominal_minutes_played",
+  "minutes_played",
   "total_distance_m",
   "zone1_distance_m",
   "zone2_distance_m",
@@ -82,17 +82,17 @@ df <- df %>%
 df <- df %>%
   # Filter out rows where player played less than 10 minutes
   filter(
-    !(is.na(nominal_minutes_played) | nominal_minutes_played < 10)
+    !(is.na(minutes_played) | minutes_played < 10)
   ) %>%
   
   # Normalize distance statistics by minutes played
   mutate(
-    normalized_total_distance_m = total_distance_m / nominal_minutes_played,
-    normalized_zone1_distance_m = zone1_distance_m / nominal_minutes_played,
-    normalized_zone2_distance_m = zone2_distance_m / nominal_minutes_played,
-    normalized_zone3_distance_m = zone3_distance_m / nominal_minutes_played,
-    normalized_zone4_distance_m = zone4_distance_m / nominal_minutes_played,
-    normalized_zone5_distance_m = zone5_distance_m / nominal_minutes_played,
+    normalized_total_distance_m = total_distance_m / minutes_played,
+    normalized_zone1_distance_m = zone1_distance_m / minutes_played,
+    normalized_zone2_distance_m = zone2_distance_m / minutes_played,
+    normalized_zone3_distance_m = zone3_distance_m / minutes_played,
+    normalized_zone4_distance_m = zone4_distance_m / minutes_played,
+    normalized_zone5_distance_m = zone5_distance_m / minutes_played,
   )
 
 nrow(df)
@@ -125,10 +125,10 @@ df %>%
 
 ```{r}
 pairs.panels(df[, c(
-  "prev_nominal_minutes_played",
+  "prev_minutes_played",
   "prev_total_distance_m",
   "recovery_days",
-  "nominal_minutes_played",
+  "minutes_played",
   "normalized_total_distance_m"
 )], gap = 0, pch = ".")
 ```
@@ -137,7 +137,7 @@ pairs.panels(df[, c(
 # Running Rate vs. Minutes Played by Position
 df %>%
   ggplot(aes(
-    x = nominal_minutes_played,
+    x = minutes_played,
     y = normalized_total_distance_m,
     color = position
   )) +
@@ -159,7 +159,7 @@ df %>%
   filter(recovery_days < 15) %>%
   mutate(
     minutes_bin = cut(
-      nominal_minutes_played,
+      minutes_played,
       breaks = c(0, 30, 60, 90, Inf),
       labels = c("≤30", "31–60", "61–90", ">90")
     )
@@ -195,7 +195,7 @@ df %>%
   ungroup() %>%
   mutate(
     minutes_bin = cut(
-      nominal_minutes_played,
+      minutes_played,
       breaks = c(0, 30, 60, 90, Inf),
       labels = c("≤30", "31–60", "61–90", ">90")
     )
@@ -222,7 +222,7 @@ df %>%
   filter(!is.na(prev_total_distance_m)) %>%
   mutate(
     minutes_bin = cut(
-      nominal_minutes_played,
+      minutes_played,
       breaks = c(0, 30, 60, 90, Inf),
       labels = c("≤30", "31–60", "61–90", ">90")
     )
@@ -256,7 +256,7 @@ df %>%
   ungroup() %>%
   mutate(
     minutes_bin = cut(
-      nominal_minutes_played,
+      minutes_played,
       breaks = c(0, 30, 60, 90, Inf),
       labels = c("≤30", "31–60", "61–90", ">90")
     )
@@ -297,11 +297,11 @@ summary(fit1)
 ```{r}
 # Fix position and recovery days and plot fitted values to see spline curve
 
-# Add ns(nominal_minutes_played, df=4)
+# Add ns(minutes_played, df=4)
 fit2 <- lm(normalized_total_distance_m ~
              recovery_days +
              position +
-             ns(nominal_minutes_played, df=4),
+             ns(minutes_played, df=4),
            data = df_filtered)
 summary(fit2)
 ```
@@ -312,7 +312,7 @@ fit3 <- lm(normalized_total_distance_m ~
              recovery_days +
              position +
              prev_total_distance_m +
-             ns(nominal_minutes_played, df=4),
+             ns(minutes_played, df=4),
            data = df_filtered)
 summary(fit3)
 ```
@@ -323,7 +323,7 @@ fit4 <- lmer(normalized_total_distance_m ~
                recovery_days +
                position +
                prev_total_distance_m +
-               ns(nominal_minutes_played, df=4) +
+               ns(minutes_played, df=4) +
                (1 | team_tournament_id),
              data = df_filtered)
 summary(fit4)
@@ -335,7 +335,7 @@ fit5 <- lmer(normalized_total_distance_m ~
                recovery_days +
                position +
                prev_total_distance_m +
-               ns(nominal_minutes_played, df=4) +
+               ns(minutes_played, df=4) +
                (1 | team_tournament_id) +
                (1 | player_tournament_id),
              data = df_filtered)

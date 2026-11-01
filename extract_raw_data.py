@@ -21,12 +21,12 @@ Usage:
 The input directories and output CSV path are configured as constants below.
 
 Notes:
-- "nominal_minutes_played" ignores stoppage time. A substitution at 90+2
+- "minutes_played" ignores stoppage time. A substitution at 90+2
   is treated as minute 90, and a substitution at 120+1 as minute 120.
 - Substitution times are identified from the up/down arrow icons drawn next
   to timestamps on the lineup page.
 - Dismissals are identified from red card icons, or from two yellow card
-  icons, and end a player's nominal minutes at "sent_off_minute".
+  icons, and end a player's minutes_played at "sent_off_minute".
 - FIFA's definitions of "High Speed Runs" and "Sprints" differ across some
   report editions, so the source definitions are stored alongside the values.
 """
@@ -88,7 +88,7 @@ OUTPUT_COLUMNS = [
     "sub_off_minute",
     "sent_off_minute",
     "match_duration_min",
-    "nominal_minutes_played",
+    "minutes_played",
     "total_distance_m",
     "zone1_distance_m",
     "zone2_distance_m",
@@ -100,10 +100,61 @@ OUTPUT_COLUMNS = [
     "top_speed_kmh",
     "high_speed_runs_definition",
     "sprints_definition",
+    "tackles_made",
+    "tackles_won",
+    "blocks",
+    "interceptions",
+    "pressing_direct",
+    "pressing_indirect",
+    "aerial_duels_won",
+    "physical_duels_won",
+    "possession_contests_won",
+    "clearances",
+    "loose_ball_receptions",
+    "pushing_on",
+    "pushing_on_into_pressing",
+    "possession_regains",
+    "possession_interrupted",
     "source_pdf",
     "lineup_page",
     "physical_page",
+    "oop_page",
     "qc_flag",
+]
+
+# Out-of-possession table columns, each located by a header word that is
+# unique to that column (the nth occurrence, for words that repeat). Header
+# positions differ between report editions, and "Forced Turnovers" is absent
+# from some reports, so columns are found by header rather than fixed x-ranges.
+# "tackles" holds the combined "Made / Won" cell and is split when parsed.
+# "forced_turnovers" is located only so its values are not assigned to a
+# neighboring column; it is always 0 where present and is not output.
+OOP_HEADERS = [
+    ("tackles", "Tackles", 0),
+    ("blocks", "Blocks", 0),
+    ("interceptions", "Interceptions", 0),
+    ("pressing_direct", "Direct", 0),
+    ("pressing_indirect", "Indirect", 0),
+    ("forced_turnovers", "Turnovers", 0),
+    ("aerial_duels_won", "Aerial", 0),
+    ("physical_duels_won", "Physical", 0),
+    ("possession_contests_won", "Contests", 0),
+    ("clearances", "Clearances", 0),
+    ("loose_ball_receptions", "Receptions", 0),
+    ("pushing_on", "Pushing", 0),
+    ("pushing_on_into_pressing", "Pushing", 1),
+    ("possession_regains", "Regains", 0),
+    ("possession_interrupted", "Interrupted", 0),
+]
+
+OOP_COLUMNS = [
+    "tackles_made",
+    "tackles_won",
+    *(
+        column
+        for column, _, _ in OOP_HEADERS
+        if column not in {"tackles", "forced_turnovers"}
+    ),
 ]
 
 
@@ -632,7 +683,7 @@ def parse_lineup_side(page: fitz.Page, side: str, duration: int) -> list[dict]:
         if off is not None and sent_off_minute is not None:
             off = min(off, sent_off_minute)
 
-        nominal_minutes_played = (
+        minutes_played = (
             off - on if on is not None and off is not None else None
         )
 
@@ -646,7 +697,7 @@ def parse_lineup_side(page: fitz.Page, side: str, duration: int) -> list[dict]:
                 "sub_on_minute": sub_on_minute,
                 "sub_off_minute": sub_off_minute,
                 "sent_off_minute": sent_off_minute,
-                "nominal_minutes_played": nominal_minutes_played,
+                "minutes_played": minutes_played,
                 "substitution_icon_unrecognized": substitution_icon_unrecognized,
             }
         )
@@ -785,6 +836,111 @@ def parse_physical_page(page: fitz.Page) -> tuple[str, list[dict]]:
     return team, output
 
 
+def parse_oop_page(page: fitz.Page) -> tuple[str, list[dict]]:
+    """
+    Parse one FIFA individual "Out of Possession <Team>" page.
+
+    Each value is assigned to the column whose header is horizontally
+    nearest, since column positions vary between report editions.
+    """
+    text = page.get_text("text")
+    lines = [re.sub(r"\s+", " ", x).strip() for x in text.splitlines() if x.strip()]
+
+    team = None
+
+    for i, line in enumerate(lines):
+        if line == "Out of Possession" and i + 1 < len(lines):
+            team = lines[i + 1]
+            break
+
+    if team is None:
+        m = re.search(r"Out of Possession\s+([^\n]+)", text)
+        team = m.group(1).strip() if m else ""
+
+    words = page.get_text("words")
+
+    hash_words = [w for w in words if w[4] == "#"]
+
+    if not hash_words:
+        raise ValueError("Could not find out-of-possession table header.")
+
+    header_y = (hash_words[0][1] + hash_words[0][3]) / 2
+    header_words = sorted(
+        (w for w in words if abs((w[1] + w[3]) / 2 - header_y) < 10),
+        key=lambda w: w[0],
+    )
+
+    # Map each column to the x-center of its identifying header word.
+    column_centers = {}
+
+    for column, keyword, occurrence in OOP_HEADERS:
+        matches = [w for w in header_words if w[4] == keyword]
+
+        if len(matches) > occurrence:
+            word = matches[occurrence]
+            column_centers[column] = (word[0] + word[2]) / 2
+
+    for column in ("tackles", "pressing_direct", "possession_interrupted"):
+        if column not in column_centers:
+            raise ValueError(f"Missing out-of-possession header for {column}.")
+
+    rows = group_words_into_rows(words, x_min=15, x_max=945, tolerance=2.5)
+
+    output = []
+
+    for row in rows:
+        y_center = sum((w[1] + w[3]) / 2 for w in row) / len(row)
+
+        if y_center <= header_y + 10:
+            continue
+
+        shirt_words = [
+            w for w in row if w[0] < 35 and re.fullmatch(r"\d{1,2}", w[4])
+        ]
+
+        if not shirt_words:
+            continue
+
+        shirt_number = int(shirt_words[0][4])
+
+        cells = {column: [] for column in column_centers}
+
+        for word in row:
+            x_center = (word[0] + word[2]) / 2
+
+            # The player name column ends before the first stat column.
+            if word[0] < 35 or x_center < column_centers["tackles"] - 30:
+                continue
+            if not re.fullmatch(r"\d+|/", word[4]):
+                continue
+
+            column = min(
+                column_centers,
+                key=lambda c: abs(column_centers[c] - x_center),
+            )
+            cells[column].append(word[4])
+
+        values = {column: None for column in OOP_COLUMNS}
+
+        cells.pop("forced_turnovers", None)
+
+        m = re.fullmatch(r"(\d+)/(\d+)", "".join(cells.pop("tackles")))
+
+        if m:
+            values["tackles_made"] = int(m.group(1))
+            values["tackles_won"] = int(m.group(2))
+
+        for column, tokens in cells.items():
+            # Adjacent digit tokens are rejoined in case PDF tokenization
+            # split a multi-digit value.
+            if tokens:
+                values[column] = int("".join(tokens))
+
+        output.append({"shirt_number": shirt_number, **values})
+
+    return team, output
+
+
 def parse_pdf(path: Path) -> list[dict]:
     """Parse one match-report PDF into player-match rows."""
     doc = fitz.open(path)
@@ -816,18 +972,40 @@ def parse_pdf(path: Path) -> list[dict]:
             f"Expected 2 physical-data pages; found {len(physical_pages)}."
         )
 
+    teams = [metadata["team1"], metadata["team2"]]
+
+    def match_team(extracted_team: str, index: int) -> str:
+        normalized_extracted = normalize_id(extracted_team)
+        return next(
+            (t for t in teams if normalize_id(t) == normalized_extracted),
+            teams[index],
+        )
+
+    oop = {}
+
+    for page_index, page in enumerate(doc):
+        if not page.get_text("text").lstrip().startswith("Out of Possession"):
+            continue
+
+        team_name, oop_rows = parse_oop_page(page)
+        team = match_team(team_name, len(oop))
+        oop[team] = (
+            page_index + 1,
+            {r["shirt_number"]: r for r in oop_rows},
+        )
+
+    if len(oop) != 2:
+        raise ValueError(
+            f"Expected 2 out-of-possession pages; found {len(oop)}."
+        )
+
     output = []
 
     for index, (page_number, extracted_team, physical_rows) in enumerate(
         physical_pages
     ):
-        teams = [metadata["team1"], metadata["team2"]]
-        normalized_extracted = normalize_id(extracted_team)
-
-        team = next(
-            (t for t in teams if normalize_id(t) == normalized_extracted),
-            teams[index],
-        )
+        team = match_team(extracted_team, index)
+        oop_page, oop_by_shirt = oop.get(team, (None, {}))
 
         opponent = (
             metadata["team2"]
@@ -854,7 +1032,7 @@ def parse_pdf(path: Path) -> list[dict]:
                 sub_on = None
                 sub_off = None
                 sent_off = None
-                nominal_minutes = None
+                minutes_played = None
                 qc.append("lineup_not_matched")
             else:
                 position = lineup_player["position"]
@@ -862,7 +1040,7 @@ def parse_pdf(path: Path) -> list[dict]:
                 sub_on = lineup_player["sub_on_minute"]
                 sub_off = lineup_player["sub_off_minute"]
                 sent_off = lineup_player["sent_off_minute"]
-                nominal_minutes = lineup_player["nominal_minutes_played"]
+                minutes_played = lineup_player["minutes_played"]
 
                 if lineup_player["substitution_icon_unrecognized"]:
                     qc.append("substitution_icon_unrecognized")
@@ -870,8 +1048,14 @@ def parse_pdf(path: Path) -> list[dict]:
                 if not starter and sub_on is None:
                     qc.append("substitute_entry_not_inferred")
 
-                if nominal_minutes is not None and nominal_minutes <= 0:
-                    qc.append("nonpositive_nominal_minutes")
+                if minutes_played is not None and minutes_played <= 0:
+                    qc.append("nonpositive_minutes_played")
+
+            oop_player = oop_by_shirt.get(physical["shirt_number"])
+
+            if oop_player is None:
+                oop_player = {column: None for column in OOP_COLUMNS}
+                qc.append("oop_not_matched")
 
             # Keep the FIFA physical-table name exactly as extracted apart
             # from whitespace normalization; no duplicate/canonical name field.
@@ -907,7 +1091,7 @@ def parse_pdf(path: Path) -> list[dict]:
                 "sub_off_minute": sub_off,
                 "sent_off_minute": sent_off,
                 "match_duration_min": duration,
-                "nominal_minutes_played": nominal_minutes,
+                "minutes_played": minutes_played,
                 "total_distance_m": physical["total_distance_m"],
                 "zone1_distance_m": physical["zone1_distance_m"],
                 "zone2_distance_m": physical["zone2_distance_m"],
@@ -921,9 +1105,11 @@ def parse_pdf(path: Path) -> list[dict]:
                     "high_speed_runs_definition"
                 ],
                 "sprints_definition": physical["sprints_definition"],
+                **{column: oop_player[column] for column in OOP_COLUMNS},
                 "source_pdf": path.name,
                 "lineup_page": 2,
                 "physical_page": page_number,
+                "oop_page": oop_page,
                 "qc_flag": ";".join(qc),
             }
 
