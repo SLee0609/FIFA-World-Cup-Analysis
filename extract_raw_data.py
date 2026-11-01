@@ -25,6 +25,8 @@ Notes:
   is treated as minute 90, and a substitution at 120+1 as minute 120.
 - Substitution times are identified from the up/down arrow icons drawn next
   to timestamps on the lineup page.
+- Dismissals are identified from red card icons, or from two yellow card
+  icons, and end a player's nominal minutes at "sent_off_minute".
 - FIFA's definitions of "High Speed Runs" and "Sprints" differ across some
   report editions, so the source definitions are stored alongside the values.
 """
@@ -84,6 +86,7 @@ OUTPUT_COLUMNS = [
     "starter",
     "sub_on_minute",
     "sub_off_minute",
+    "sent_off_minute",
     "match_duration_min",
     "nominal_minutes_played",
     "total_distance_m",
@@ -354,6 +357,31 @@ def _arrow_direction(drawing: dict) -> str | None:
     return "sub_on" if distance_to_top_tip < distance_to_bottom_tip else "sub_off"
 
 
+def _card_color(drawing: dict) -> str | None:
+    """
+    Recognize FIFA's booking icon: a single filled rectangle about 6x9 pt.
+
+    Yellow and red cards share the same geometry, so the fill color is used
+    here: yellow is approximately (0.98, 0.75, 0.14) and red approximately
+    (0.97, 0.44, 0.44).
+    """
+    rect = fitz.Rect(drawing["rect"])
+    items = drawing.get("items", [])
+
+    if not (4.0 <= rect.width <= 8.0 and 7.0 <= rect.height <= 11.0):
+        return None
+
+    if len(items) != 1 or items[0][0] != "re":
+        return None
+
+    fill = drawing.get("fill")
+
+    if not fill or len(fill) < 3 or fill[0] < 0.8:
+        return None
+
+    return "yellow_card" if fill[1] >= 0.6 else "red_card"
+
+
 def classify_timestamp_icon(page: fitz.Page, timestamp_rect: fitz.Rect) -> str:
     """
     Inspect the vector icon immediately to the left of a timestamp.
@@ -361,10 +389,12 @@ def classify_timestamp_icon(page: fitz.Page, timestamp_rect: fitz.Rect) -> str:
     Returns one of:
         "sub_on"       - upward substitution arrow
         "sub_off"      - downward substitution arrow
-        "other"        - a timestamp with a non-substitution icon (goal/card)
+        "yellow_card"  - yellow booking icon
+        "red_card"     - red booking icon
+        "other"        - a timestamp with another icon (e.g. goal)
         "unrecognized" - an arrow-like icon was found but orientation could
                          not be determined
-        "none"         - no substitution-arrow geometry was found
+        "none"         - no recognized icon geometry was found
 
     The page's text extraction omits the icons, but ``page.get_drawings()``
     retains their vector paths. This lets us distinguish substitution times
@@ -397,6 +427,11 @@ def classify_timestamp_icon(page: fitz.Page, timestamp_rect: fitz.Rect) -> str:
             return direction
         if direction == "unrecognized":
             arrow_like_found = True
+
+        card = _card_color(drawing)
+
+        if card is not None:
+            return card
 
     if arrow_like_found:
         return "unrecognized"
@@ -435,11 +470,14 @@ def parse_lineup_side(page: fitz.Page, side: str, duration: int) -> list[dict]:
     """
     words = page.get_text("words")
 
-    # The player lists live at the far left/right of page 2.
+    # The player lists live at the far left/right of page 2. A player with
+    # several events can have a fourth timestamp reaching x=314 on the left
+    # or starting at x=658 on the right, so the bounds stop just short of the
+    # central formation graphic (x>=320) and right-hand header text (x<=630).
     if side == "left":
-        rows = group_words_into_rows(words, x_min=20, x_max=300)
+        rows = group_words_into_rows(words, x_min=20, x_max=318)
     else:
-        rows = group_words_into_rows(words, x_min=660, x_max=940)
+        rows = group_words_into_rows(words, x_min=645, x_max=940)
 
     markers = {}
 
@@ -518,6 +556,8 @@ def parse_lineup_side(page: fitz.Page, side: str, duration: int) -> list[dict]:
         timestamp_events = extract_timestamp_events(row)
         sub_on_events = []
         sub_off_events = []
+        yellow_card_events = []
+        red_card_events = []
         substitution_icon_unrecognized = False
 
         for event in timestamp_events:
@@ -527,6 +567,10 @@ def parse_lineup_side(page: fitz.Page, side: str, duration: int) -> list[dict]:
                 sub_on_events.append(event["timestamp"])
             elif icon_type == "sub_off":
                 sub_off_events.append(event["timestamp"])
+            elif icon_type == "yellow_card":
+                yellow_card_events.append(event["timestamp"])
+            elif icon_type == "red_card":
+                red_card_events.append(event["timestamp"])
             elif icon_type == "unrecognized":
                 substitution_icon_unrecognized = True
 
@@ -557,6 +601,22 @@ def parse_lineup_side(page: fitz.Page, side: str, duration: int) -> list[dict]:
             on = None
             sub_on_minute = None
 
+        # FIFA marks a straight red with a red card icon, and a second yellow
+        # with two yellow card icons rather than a red one. Booking times may
+        # be written as absolute minutes (e.g. 93'), which nominal_minute()
+        # caps at the match duration.
+        sent_off_candidates = [
+            nominal_minute(t, duration) for t in red_card_events
+        ]
+
+        if len(yellow_card_events) >= 2:
+            yellow_minutes = sorted(
+                nominal_minute(t, duration) for t in yellow_card_events
+            )
+            sent_off_candidates.append(yellow_minutes[1])
+
+        sent_off_minute = min(sent_off_candidates) if sent_off_candidates else None
+
         if sub_off_time_raw is not None:
             off = nominal_minute(sub_off_time_raw, duration)
             sub_off_minute = off
@@ -566,6 +626,11 @@ def parse_lineup_side(page: fitz.Page, side: str, duration: int) -> list[dict]:
         else:
             off = None
             sub_off_minute = None
+
+        # A dismissal ends the player's time on the pitch, unless they had
+        # already been substituted off (e.g. a red card on the bench).
+        if off is not None and sent_off_minute is not None:
+            off = min(off, sent_off_minute)
 
         nominal_minutes_played = (
             off - on if on is not None and off is not None else None
@@ -580,6 +645,7 @@ def parse_lineup_side(page: fitz.Page, side: str, duration: int) -> list[dict]:
                 "sub_off_time_raw": sub_off_time_raw,
                 "sub_on_minute": sub_on_minute,
                 "sub_off_minute": sub_off_minute,
+                "sent_off_minute": sent_off_minute,
                 "nominal_minutes_played": nominal_minutes_played,
                 "substitution_icon_unrecognized": substitution_icon_unrecognized,
             }
@@ -787,6 +853,7 @@ def parse_pdf(path: Path) -> list[dict]:
                 starter = None
                 sub_on = None
                 sub_off = None
+                sent_off = None
                 nominal_minutes = None
                 qc.append("lineup_not_matched")
             else:
@@ -794,6 +861,7 @@ def parse_pdf(path: Path) -> list[dict]:
                 starter = lineup_player["starter"]
                 sub_on = lineup_player["sub_on_minute"]
                 sub_off = lineup_player["sub_off_minute"]
+                sent_off = lineup_player["sent_off_minute"]
                 nominal_minutes = lineup_player["nominal_minutes_played"]
 
                 if lineup_player["substitution_icon_unrecognized"]:
@@ -837,6 +905,7 @@ def parse_pdf(path: Path) -> list[dict]:
                 "starter": int(starter) if starter is not None else None,
                 "sub_on_minute": sub_on,
                 "sub_off_minute": sub_off,
+                "sent_off_minute": sent_off,
                 "match_duration_min": duration,
                 "nominal_minutes_played": nominal_minutes,
                 "total_distance_m": physical["total_distance_m"],
