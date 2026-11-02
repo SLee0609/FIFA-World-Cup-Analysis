@@ -9,7 +9,7 @@ PAGES = [
     "https://www.fifatrainingcentre.com/en/fifa-world-cup-2026/match-report-hub-knockout-stage.php",
 ]
 
-OUTPUT_DIR = "world_cup_2026_match_reports"
+OUTPUT_DIR = "2026_match_reports"
 
 # ------------------------------------------------------------
 # Choose which matches to download.
