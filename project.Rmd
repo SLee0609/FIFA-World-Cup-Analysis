@@ -80,6 +80,11 @@ df <- df %>%
     !(is.na(minutes_played) | minutes_played < 10)
   ) %>%
   
+  # Set reference categories for factor variables
+  mutate(
+    position = relevel(factor(position), ref = "GK")
+  ) %>%
+  
   # Normalize statistics by minutes played
   mutate(
     normalized_total_distance_m = total_distance_m / minutes_played,
@@ -95,16 +100,26 @@ nrow(df)
 ```
 
 ```{r}
-table(df$binned_minutes_played)
-```
-
-
-```{r}
 head(df)
 str(df)
 ```
 
 ## 2. Data Visualization
+
+```{r}
+# Minutes Played Distribution
+df %>%
+  ggplot(aes(
+    x = minutes_played
+  )) +
+  geom_histogram(alpha = 0.15, bins = 100, color = "firebrick") +
+  labs(
+    title = "Minutes Played Distribution",
+    x = "Minutes played",
+    y = "Count"
+  ) +
+  theme(legend.position = "none")
+```
 
 ### Running Rate
 
@@ -157,7 +172,6 @@ df %>%
 # Running Rate vs. Recovery Days by Position and Minutes Played
 df %>%
   filter(!is.na(recovery_days)) %>%
-  # filter(recovery_days < 15) %>%
   ggplot(aes(
     x = recovery_days,
     y = normalized_total_distance_m,
@@ -166,6 +180,7 @@ df %>%
   geom_point(alpha = 0.4) +
   geom_smooth(method = "lm") +
   facet_wrap(~position) +
+  coord_cartesian(xlim = c(min(df$recovery_days), 15)) +
   labs(
     title = "Running Rate vs. Recovery Days by Position and Minutes Played",
     x = "Recovery days",
@@ -193,6 +208,7 @@ df %>%
   geom_point(alpha = 0.4) +
   geom_smooth(method = "lm") +
   facet_wrap(~position) +
+  coord_cartesian(xlim = c(-7, 7)) +
   labs(
     title = "Within-Player Running Rate vs. Recovery Days",
     x = "Recovery days relative to player average",
@@ -322,7 +338,6 @@ df_no_gk %>%
 # Pressing Rate vs. Recovery Days by Position and Minutes Played
 df_no_gk %>%
   filter(!is.na(recovery_days)) %>%
-  # filter(recovery_days < 15) %>%
   ggplot(aes(
     x = recovery_days,
     y = normalized_pressing_direct,
@@ -331,6 +346,7 @@ df_no_gk %>%
   geom_point(alpha = 0.4) +
   geom_smooth(method = "lm") +
   facet_wrap(~position) +
+  coord_cartesian(xlim = c(min(df$recovery_days), 15)) +
   labs(
     title = "Pressing Rate vs. Recovery Days by Position and Minutes Played",
     x = "Recovery days",
@@ -358,6 +374,7 @@ df_no_gk %>%
   geom_point(alpha = 0.4) +
   geom_smooth(method = "lm") +
   facet_wrap(~position) +
+  coord_cartesian(xlim = c(-7, 7)) +
   labs(
     title = "Within-Player Pressing Rate vs. Recovery Days",
     x = "Recovery days relative to player average",
@@ -428,6 +445,7 @@ df_filtered <- df %>% filter(!is.na(recovery_days))
 fit1 <- lm(normalized_total_distance_m ~
              recovery_days +
              position,
+           weights = minutes_played,
            data = df_filtered)
 summary(fit1)
 ```
@@ -438,6 +456,7 @@ fit2 <- lm(normalized_total_distance_m ~
              recovery_days +
              position +
              ns(minutes_played, df=4),
+           weights = minutes_played,
            data = df_filtered)
 summary(fit2)
 ```
@@ -449,6 +468,7 @@ fit3 <- lm(normalized_total_distance_m ~
              position +
              prev_total_distance_m +
              ns(minutes_played, df=4),
+           weights = minutes_played,
            data = df_filtered)
 summary(fit3)
 ```
@@ -461,6 +481,7 @@ fit4 <- lmer(normalized_total_distance_m ~
                prev_total_distance_m +
                ns(minutes_played, df=4) +
                (1 | team_tournament_id),
+             weights = minutes_played,
              data = df_filtered)
 summary(fit4)
 ```
@@ -474,6 +495,7 @@ fit5 <- lmer(normalized_total_distance_m ~
                ns(minutes_played, df=4) +
                (1 | team_tournament_id) +
                (1 | player_tournament_id),
+             weights = minutes_played,
              data = df_filtered)
 summary(fit5)
 ```
@@ -641,4 +663,66 @@ team_re_subset %>%
   theme(legend.position = "none", plot.title.position = "plot")
 ```
 
+```{r, fig.height=6, fig.width=10}
+# Dot and whisker plot of fixed-effect coefficients (95% intervals)
+position_group <- paste0("Position (vs. ", levels(factor(df_filtered$position))[1], ")")
+coef_groups <- c("Intercept", position_group, "Recovery days", "Previous-match distance")
 
+coef_df <- as.data.frame(coef(summary(final_running_rate_fit))) %>%
+  tibble::rownames_to_column("term") %>%
+  rename(estimate = Estimate, se = `Std. Error`) %>%
+  filter(!grepl("^ns\\(minutes_played", term)) %>%
+  mutate(
+    group = case_when(
+      term == "(Intercept)" ~ "Intercept",
+      grepl("^position", term) ~ position_group,
+      term == "recovery_days" ~ "Recovery days",
+      term == "prev_total_distance_m" ~ "Previous-match distance"
+    ),
+    units = case_when(
+      term == "recovery_days" ~ "meters per minute per day",
+      term == "prev_total_distance_m" ~ "meters per minute per meter",
+      TRUE ~ "meters per minute"
+    ),
+    term = sub("^position", "", term)
+  )
+
+# One panel per coefficient group, each with its own x-axis title; only the position panel keeps y-axis labels
+coef_plots <- lapply(coef_groups, function(g) {
+  group_df <- coef_df %>% filter(group == g)
+  group_df %>%
+    ggplot(aes(
+      x = estimate,
+      y = reorder(term, estimate)
+    )) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "firebrick") +
+    geom_errorbarh(aes(xmin = estimate - 1.96 * se, xmax = estimate + 1.96 * se), height = 0) +
+    geom_point() +
+    labs(
+      title = g,
+      x = paste0("Coefficient estimate (", group_df$units[1], ")"),
+      y = NULL
+    ) +
+    theme(legend.position = "none", plot.title = element_text(size = 11)) +
+    if (g != position_group) theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+})
+
+cowplot::plot_grid(
+  cowplot::ggdraw() +
+    cowplot::draw_label("Fixed-Effect Coefficients for Running Rate", x = 0.01, hjust = 0, size = 14),
+  cowplot::plot_grid(plotlist = coef_plots, ncol = 2, align = "hv"),
+  ncol = 1,
+  rel_heights = c(0.07, 1)
+)
+```
+
+```{r}
+# Be intentional about picking default value for factor variables
+# Maybe try modeling zone 4/5 running rate?
+
+# Also try categorical recovery days predictor (start with 3, 4, 5, 6, 7, 8, 9, 10, 11, 12+, then group more higher terms together)
+
+# Later TODO: predict expected goals with team-level average recovery days, prior match distance covered, etc weighted by minutes played
+
+table(df$recovery_days)
+```
