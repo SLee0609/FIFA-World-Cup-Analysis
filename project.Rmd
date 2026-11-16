@@ -439,7 +439,6 @@ df_no_gk %>%
 df_filtered <- df %>% filter(!is.na(recovery_days))
 ```
 
-
 ```{r}
 # normalized_total_distance_m ~ 1 + recovery_days + position
 fit1 <- lm(normalized_total_distance_m ~
@@ -716,11 +715,265 @@ cowplot::plot_grid(
 )
 ```
 
+### Pressing Rate
+
 ```{r}
-# Be intentional about picking default value for factor variables
+# Ignore rows corresponding to first game at the tournament for a player (missing previous game data)
+# Start from df_no_gk since goalkeepers all have 0 presses and drop the unused GK level and set FW as the reference position
+df_no_gk_filtered <- df_no_gk %>%
+  filter(!is.na(recovery_days)) %>%
+  droplevels() %>%
+  mutate(position = relevel(position, ref = "FW"))
+```
+
+```{r}
+# normalized_pressing_direct ~ 1 + recovery_days + position
+pressing_fit1 <- lm(normalized_pressing_direct ~
+                      recovery_days +
+                      position,
+                    weights = minutes_played,
+                    data = df_no_gk_filtered)
+summary(pressing_fit1)
+```
+
+```{r}
+# Add ns(minutes_played, df=4)
+pressing_fit2 <- lm(normalized_pressing_direct ~
+                      recovery_days +
+                      position +
+                      ns(minutes_played, df=4),
+                    weights = minutes_played,
+                    data = df_no_gk_filtered)
+summary(pressing_fit2)
+```
+
+```{r}
+# Add prev_total_distance_m
+pressing_fit3 <- lm(normalized_pressing_direct ~
+                      recovery_days +
+                      position +
+                      prev_total_distance_m +
+                      ns(minutes_played, df=4),
+                    weights = minutes_played,
+                    data = df_no_gk_filtered)
+summary(pressing_fit3)
+```
+
+```{r}
+# Add random_effect(team_tournament_id)
+pressing_fit4 <- lmer(normalized_pressing_direct ~
+                        recovery_days +
+                        position +
+                        prev_total_distance_m +
+                        ns(minutes_played, df=4) +
+                        (1 | team_tournament_id),
+                      weights = minutes_played,
+                      data = df_no_gk_filtered)
+summary(pressing_fit4)
+```
+
+```{r}
+# Add random_effect(player_tournament_id)
+pressing_fit5 <- lmer(normalized_pressing_direct ~
+                        recovery_days +
+                        position +
+                        prev_total_distance_m +
+                        ns(minutes_played, df=4) +
+                        (1 | team_tournament_id) +
+                        (1 | player_tournament_id),
+                      weights = minutes_played,
+                      data = df_no_gk_filtered)
+summary(pressing_fit5)
+```
+
+```{r}
+final_pressing_rate_fit = pressing_fit5
+```
+
+```{r}
+# Plot spline curve for minutes_played by fixing recovery days and previous-match distance to median values and random effects set to 0
+pressing_spline_grid <- expand.grid(
+  minutes_played = seq(min(df_no_gk_filtered$minutes_played), max(df_no_gk_filtered$minutes_played), by = 1),
+  position = sort(unique(df_no_gk_filtered$position)),
+  recovery_days = median(df_no_gk_filtered$recovery_days),
+  prev_total_distance_m = median(df_no_gk_filtered$prev_total_distance_m)
+)
+pressing_spline_grid$fitted <- predict(final_pressing_rate_fit, newdata = pressing_spline_grid, re.form = NA)
+
+# Overlay fitted curves on the observed data
+df_no_gk_filtered %>%
+  ggplot(aes(
+    x = minutes_played,
+    y = normalized_pressing_direct,
+    color = position
+  )) +
+  geom_point(alpha = 0.4) +
+  geom_line(data = pressing_spline_grid, aes(y = fitted), linewidth = 1) +
+  labs(
+    title = "Fitted Pressing Rate vs. Minutes Played by Position",
+    subtitle = paste0(
+      "Recovery days = ", pressing_spline_grid$recovery_days[1],
+      ", Previous-match distance = ", round(pressing_spline_grid$prev_total_distance_m[1]), " m"
+    ),
+    x = "Minutes played",
+    y = "Pressing rate (presses per minute)",
+    color = "Position"
+  )
+```
+
+```{r}
+# Extract random intercepts and their conditional standard errors
+pressing_rate_re <- as.data.frame(ranef(final_pressing_rate_fit, condVar = TRUE)) %>%
+  rename(intercept = condval, se = condsd)
+
+# Team random intercepts, with team name and tournament year attached
+pressing_team_info <- df_no_gk_filtered %>%
+  distinct(team_tournament_id, team, tournament_year)
+
+pressing_team_re <- pressing_rate_re %>%
+  filter(grpvar == "team_tournament_id") %>%
+  transmute(team_tournament_id = as.character(grp), intercept, se) %>%
+  left_join(pressing_team_info, by = "team_tournament_id") %>%
+  arrange(desc(intercept))
+
+# Player random intercepts, with player name, team, and position attached
+pressing_player_info <- df_no_gk_filtered %>%
+  distinct(player_tournament_id, player_name, team, tournament_year, position)
+
+pressing_player_re <- pressing_rate_re %>%
+  filter(grpvar == "player_tournament_id") %>%
+  transmute(player_tournament_id = as.character(grp), intercept, se) %>%
+  left_join(pressing_player_info, by = "player_tournament_id") %>%
+  arrange(desc(intercept))
+```
+
+```{r}
+# Top/bottom 10 team random intercepts
+head(pressing_team_re, 10)
+tail(pressing_team_re, 10)
+```
+
+```{r}
+# Top/bottom 10 player random intercepts
+pressing_player_re %>% select(player_name, team, tournament_year, position, intercept, se) %>% head(10)
+pressing_player_re %>% select(player_name, team, tournament_year, position, intercept, se) %>% tail(10)
+```
+
+```{r}
+# Reuse famous_players, famous_teams, and n_spread from the running rate section (goalkeepers are not in the pressing model, so they are skipped)
+pressing_player_re_subset <- pressing_player_re %>%
+  mutate(famous = player_tournament_id %in% famous_players) %>%
+  group_by(position) %>%
+  arrange(intercept, .by_group = TRUE) %>%
+  filter(famous | row_number() %in% round(seq(1, n(), length.out = n_spread))) %>%
+  ungroup() %>%
+  mutate(label = paste0(player_name, " (", team, " ", tournament_year, ")"))
+
+pressing_team_re_subset <- pressing_team_re %>%
+  mutate(famous = team %in% famous_teams) %>%
+  group_by(tournament_year) %>%
+  arrange(intercept, .by_group = TRUE) %>%
+  filter(famous | row_number() %in% round(seq(1, n(), length.out = n_spread))) %>%
+  ungroup()
+```
+
+```{r, fig.height=8, fig.width=10}
+# Dot and whisker plot of player random intercepts (95% intervals) by position
+pressing_player_re_subset %>%
+  ggplot(aes(
+    x = intercept,
+    y = reorder(label, intercept)
+  )) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "firebrick") +
+  geom_errorbarh(aes(xmin = intercept - 1.96 * se, xmax = intercept + 1.96 * se), height = 0) +
+  geom_point() +
+  facet_wrap(~position, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Player Random Intercepts for Pressing Rate by Position",
+    x = "Random intercept (presses per minute)",
+    y = NULL
+  ) +
+  theme(legend.position = "none", plot.title.position = "plot")
+```
+
+```{r, fig.height=6}
+# Dot and whisker plot of team random intercepts (95% intervals) by tournament year
+pressing_team_re_subset %>%
+  ggplot(aes(
+    x = intercept,
+    y = reorder(team_tournament_id, intercept)
+  )) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "firebrick") +
+  geom_errorbarh(aes(xmin = intercept - 1.96 * se, xmax = intercept + 1.96 * se), height = 0) +
+  geom_point() +
+  facet_wrap(~tournament_year, scales = "free_y") +
+  scale_y_discrete(labels = function(x) pressing_team_info$team[match(x, pressing_team_info$team_tournament_id)]) +
+  labs(
+    title = "Team Random Intercepts for Pressing Rate by Tournament",
+    x = "Random intercept (presses per minute)",
+    y = NULL
+  ) +
+  theme(legend.position = "none", plot.title.position = "plot")
+```
+
+```{r, fig.height=6, fig.width=10}
+# Dot and whisker plot of fixed-effect coefficients (95% intervals)
+pressing_position_group <- paste0("Position (vs. ", levels(df_no_gk_filtered$position)[1], ")")
+pressing_coef_groups <- c("Intercept", pressing_position_group, "Recovery days", "Previous-match distance")
+
+pressing_coef_df <- as.data.frame(coef(summary(final_pressing_rate_fit))) %>%
+  tibble::rownames_to_column("term") %>%
+  rename(estimate = Estimate, se = `Std. Error`) %>%
+  filter(!grepl("^ns\\(minutes_played", term)) %>%
+  mutate(
+    group = case_when(
+      term == "(Intercept)" ~ "Intercept",
+      grepl("^position", term) ~ pressing_position_group,
+      term == "recovery_days" ~ "Recovery days",
+      term == "prev_total_distance_m" ~ "Previous-match distance"
+    ),
+    units = case_when(
+      term == "recovery_days" ~ "presses per minute per day",
+      term == "prev_total_distance_m" ~ "presses per minute per meter",
+      TRUE ~ "presses per minute"
+    ),
+    term = sub("^position", "", term)
+  )
+
+# One panel per coefficient group, each with its own x-axis title; only the position panel keeps y-axis labels
+pressing_coef_plots <- lapply(pressing_coef_groups, function(g) {
+  group_df <- pressing_coef_df %>% filter(group == g)
+  group_df %>%
+    ggplot(aes(
+      x = estimate,
+      y = reorder(term, estimate)
+    )) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "firebrick") +
+    geom_errorbarh(aes(xmin = estimate - 1.96 * se, xmax = estimate + 1.96 * se), height = 0) +
+    geom_point() +
+    labs(
+      title = g,
+      x = paste0("Coefficient estimate (", group_df$units[1], ")"),
+      y = NULL
+    ) +
+    theme(legend.position = "none", plot.title = element_text(size = 11)) +
+    if (g != pressing_position_group) theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+})
+
+cowplot::plot_grid(
+  cowplot::ggdraw() +
+    cowplot::draw_label("Fixed-Effect Coefficients for Pressing Rate", x = 0.01, hjust = 0, size = 14),
+  cowplot::plot_grid(plotlist = pressing_coef_plots, ncol = 2, align = "hv"),
+  ncol = 1,
+  rel_heights = c(0.07, 1)
+)
+```
+
+```{r}
 # Maybe try modeling zone 4/5 running rate?
 
 # Also try categorical recovery days predictor (start with 3, 4, 5, 6, 7, 8, 9, 10, 11, 12+, then group more higher terms together)
+# Be intentional about picking default value for factor variables
 
 # Later TODO: predict expected goals with team-level average recovery days, prior match distance covered, etc weighted by minutes played
 
